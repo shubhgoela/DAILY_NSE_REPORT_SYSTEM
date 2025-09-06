@@ -10,11 +10,12 @@ import numpy as np
 import time
 from PIL import Image
 import calendar
-
+from openpyxl import Workbook
+from openpyxl.styles import Alignment, PatternFill, Border, Side, Font
 
 from bhavcopy_login import login
 from bhavcopy_utils import *
-from queries import get_mail_template, get_holidays_for_year, get_exception_trading_dates_to_year, get_expry_days
+# from queries import get_mail_template, get_holidays_for_year, get_exception_trading_dates_to_year, get_expry_days
 from utils import (save_bhav_copy_data, create_or_add_master_data, get_google_script_data)
 from corp_actions import adjust_corp_actions
 from financial_analyser import FinancialDataAnalyzer
@@ -34,10 +35,12 @@ SMTP_PORT = int(os.getenv('SMTP_PORT'))
 BHAVCOPY_FILE_NAMES = ['F&O-UDiFF Common Bhavcopy Final (zip)', 'F&O-Participant wise Open Interest (csv)', 'Full Bhavcopy and Security Deliverable data']
 MAIL_RECIPIENTS = ['goela.shubh@gmail.com']
 MAIL_RECIPIENTS_REPORT = ['goela.shubh@gmail.com', 'goela.engineers@gmail.com']
+GOOGLE_SCRIPT_URL = os.getenv('GOOGLE_SCRIPT_URL')
 
 BHAV_COPY_ARCHIVE_PATH = os.getenv('BHAV_COPY_ARCHIVE_PATH', 'bhav_copy_archive')
 FO_BHAV_COPY_ARCHIVE_PATH = os.getenv('FO_BHAV_COPY_ARCHIVE_PATH', 'fo_bhav_copy_archive')
 
+INDEX_SYMBOLS = {'NIFTY', 'BANKNIFTY', 'FINNIFTY', 'MIDCPNIFTY', 'SMALLCAPNIFTY', 'NIFTYNXT50'}
 
 
 def check_for_files( eq_section_id= "cr_equity_daily_Current", der_section_id="cr_deriv_equity_daily_Current"):
@@ -70,7 +73,7 @@ def process_filter_docs_for_noti(filtered_docs, template_name = 'bhavcopy_noti',
     if len(filtered_docs) > 0:
         for file in filtered_docs:
             print('generating html...')
-            template = get_mail_template(template_name)
+            # template = get_mail_template(template_name)
             template = None
             body = generate_html_table(template, [file])
 
@@ -290,6 +293,7 @@ def get_pcr(fo_bhav_copy, XpryDt, index, ref_date = None):
     # return fo_data_filterd, fo_data_filterd_ce, fo_data_filterd_pe
     return fo_data_filterd_pe['OpnIntrst'].sum()/ fo_data_filterd_ce['OpnIntrst'].sum()
 
+
 def create_stock_analysis_report(curr_bhav, fo_bhav_copy, month_expry, symbols):
     """
     Create a stock analysis report using the FinancialDataAnalyzer class.
@@ -315,6 +319,187 @@ def create_stock_analysis_report(curr_bhav, fo_bhav_copy, month_expry, symbols):
     
     html += '<p style="margin-top:20px; font-size:12px; color:#6b7280;">Generated automatically</p>'
     return html
+
+
+def create_complete_OI_data_from_bhavcopy(curr_bhav, curr_fo_bhav, month_expry):
+
+    fo_bhav_symbols = set(curr_fo_bhav['TckrSymb'].unique())
+    symbols = fo_bhav_symbols - INDEX_SYMBOLS
+
+    summary_rows = []
+
+    for symbol in symbols:
+        print(f"Generating summary for {symbol}...")
+        prev_close = curr_bhav[curr_bhav['SYMBOL'] == symbol][' PREV_CLOSE'].values[0]
+        curr_close = curr_bhav[curr_bhav['SYMBOL'] == symbol][' CLOSE_PRICE'].values[0]
+        analyzer = FinancialDataAnalyzer(curr_fo_bhav, symbol, month_expry, curr_close, prev_close)
+
+
+        # ATM strike = nearest strike to current price
+        atm_strikes_data = analyzer.analyze_options_activity()["strikes_data"]
+        strikes = atm_strikes_data.keys()
+        atm_strike = min(strikes, key=lambda x: abs(x - curr_close))
+
+        # Max OI and additions/unwinding
+        oi_positions = analyzer.analyze_max_oi_positions()
+        
+        # PCR + totals
+        put_oi, call_oi, pcr, total_oi, chng_in_oi, pct_chng_in_oi = analyzer.get_pcr_and_total_oi()
+
+        summary = {
+
+            # Equity Details
+            "Symbol": symbol,
+            "Prev Close": prev_close,
+            "Curr Close": curr_close,
+            "Price Change": curr_close - prev_close,
+            "Price Change %": round(((curr_close - prev_close) / prev_close) * 100, 2) if prev_close != 0 else 0,
+            "PCR": pcr,
+
+            # ATM Strike details
+            "ATM Strike": atm_strike,
+            "ATM Call Price": atm_strikes_data[atm_strike].get("CE", {}).get("settlement_price", ''),
+            "ATM Call Price %Chg": atm_strikes_data[atm_strike].get("CE", {}).get("price_change_pct", ''),
+            "ATM Call OI": atm_strikes_data[atm_strike].get("CE", {}).get("oi", ''),
+            "ATM Call OI %Chg": atm_strikes_data[atm_strike].get("CE", {}).get("oi_change_pct", ''),
+            
+            "ATM Put Price": atm_strikes_data[atm_strike].get("PE", {}).get("settlement_price", ''),
+            "ATM Put Price %Chg": atm_strikes_data[atm_strike].get("PE", {}).get("price_change_pct", ''),
+            "ATM Put OI": atm_strikes_data[atm_strike].get("PE", {}).get("oi", ''),
+            "ATM Put OI %Chg": atm_strikes_data[atm_strike].get("PE", {}).get("oi_change_pct", ''),
+
+            "ATM Total OI": atm_strikes_data[atm_strike].get("CE", {}).get("oi", 0) + atm_strikes_data[atm_strike].get("PE", {}).get("oi", 0),
+            "ATM Total OI %Chg": round(((atm_strikes_data[atm_strike].get("CE", {}).get("oi_change", 0) + 
+                                atm_strikes_data[atm_strike].get("PE", {}).get("oi_change", 0)) /
+
+                                (atm_strikes_data[atm_strike].get("CE", {}).get("oi", 0) + 
+                                atm_strikes_data[atm_strike].get("PE", {}).get("oi", 0) - 
+                                (atm_strikes_data[atm_strike].get("CE", {}).get("oi_change", 0) + 
+                                atm_strikes_data[atm_strike].get("PE", {}).get("oi_change", 0)
+                                )
+                                )
+                                ) * 100, 2)
+                                if (atm_strikes_data[atm_strike].get("CE", {}).get("oi", 0) + 
+                                    atm_strikes_data[atm_strike].get("PE", {}).get("oi", 0) - 
+                                    (atm_strikes_data[atm_strike].get("CE", {}).get("oi_change", 0) + 
+                                        atm_strikes_data[atm_strike].get("PE", {}).get("oi_change", 0))) != 0 else 0, 
+
+
+            # OI Totals
+            "Total Put OI": put_oi,
+            "Total Call OI": call_oi,
+            "Total OI": total_oi,
+            "Change in Total OI": chng_in_oi,
+            "Change in Total OI %": pct_chng_in_oi,
+
+            # CE OI Positions
+            "Max Call OI Strike": oi_positions["Max Call OI"]["strike"],
+            "Max Call OI": oi_positions["Max Call OI"]["oi"],
+            "Max Call OI %Chg": oi_positions["Max Call OI"]["oi_change_pct"],
+            "Max Call OI Add Strike": oi_positions["Max Call OI addition"]["strike"],
+            "Max Call OI Add": oi_positions["Max Call OI addition"]["oi_change"],
+            "Max Call OI Add %Chg": oi_positions["Max Call OI addition"]["oi_change_pct"],
+            "Max Call OI Unwind Strike": oi_positions["Max Call OI unwinding"]["strike"],
+            "Max Call OI Unwind": oi_positions["Max Call OI unwinding"]["oi_change"],
+            "Max Call OI Unwind %Chg": oi_positions["Max Call OI unwinding"]["oi_change_pct"],
+
+            # PE OI Positions
+            "Max Put OI Strike": oi_positions["Max Put OI"]["strike"],
+            "Max Put OI": oi_positions["Max Put OI"]["oi"],
+            "Max Put OI %Chg": oi_positions["Max Put OI"]["oi_change_pct"],
+            "Max Put OI Add Strike": oi_positions["Max Put OI addition"]["strike"],
+            "Max Put OI Add": oi_positions["Max Put OI addition"]["oi_change"],
+            "Max Put OI Add %Chg": oi_positions["Max Put OI addition"]["oi_change_pct"],
+            "Max Put OI Unwind Strike": oi_positions["Max Put OI unwinding"]["strike"],
+            "Max Put OI Unwind": oi_positions["Max Put OI unwinding"]["oi_change"],
+            "Max Put OI Unwind %Chg": oi_positions["Max Put OI unwinding"]["oi_change_pct"]
+        }
+
+        summary_rows.append(summary)
+
+    return summary_rows
+
+
+def create_and_archive_OI_excel_report(summary_rows):
+
+    df = pd.DataFrame(summary_rows)
+    df.sort_values(by=["Change in Total OI %","ATM Total OI %Chg"], ascending=False, inplace=True)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Options Summary"
+
+    # Thin border style for section outlines
+    thin = Side(border_style="thin", color="000000")
+
+    # Define top-level sections (start_col, end_col)
+    sections = [
+        ("Equity Price", 1, 6),
+        ("ATM", 7, 17),
+        ("OI Totals", 18, 22),
+        ("Call Options", 23, 31),
+        ("Put Options", 32, 40)
+    ]
+
+    # Top header row (merged)
+    for title, start, end in sections:
+        ws.merge_cells(start_row=1, start_column=start, end_row=1, end_column=end)
+        cell = ws.cell(row=1, column=start, value=title)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        
+        # Apply border only at section edges
+        for col in range(start, end + 1):
+            cell = ws.cell(row=1, column=col)
+            if col == start:
+                cell.border = Border(left=thin, top=thin, bottom=thin)
+            elif col == end:
+                cell.border = Border(right=thin, top=thin, bottom=thin)
+            else:
+                cell.border = Border(top=thin, bottom=thin)
+            cell.fill = PatternFill("solid", fgColor="BDD7EE")
+
+    # Second header row (column names)
+    for col_idx, col_name in enumerate(df.columns, start=1):
+        cell = ws.cell(row=2, column=col_idx, value=col_name)
+        cell.font = Font(bold=True)
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+        cell.fill = PatternFill("solid", fgColor="FFD966")
+
+    # Write data rows with alternate coloring (no inner borders)
+    for r_idx, row in enumerate(df.itertuples(index=False), start=3):
+        fill_color = "FFF2CC" if r_idx % 2 == 1 else "FFFFFF"
+        for c_idx, value in enumerate(row, start=1):
+            cell = ws.cell(row=r_idx, column=c_idx, value=value)
+            cell.fill = PatternFill("solid", fgColor=fill_color)
+
+    # Apply outer borders for each section on data rows
+    max_row = ws.max_row
+    for _, start, end in sections:
+        # top border
+        for col in range(start, end + 1):
+            ws.cell(row=2, column=col).border = Border(top=thin)
+        # bottom border
+        for col in range(start, end + 1):
+            ws.cell(row=max_row, column=col).border = Border(bottom=thin)
+        # left & right borders
+        for row in range(2, max_row + 1):
+            ws.cell(row=row, column=start).border = Border(left=thin)
+            ws.cell(row=row, column=end).border = Border(right=thin)
+
+    # Adjust column widths
+    for i, col in enumerate(df.columns, start=1):
+        ws.column_dimensions[ws.cell(row=2, column=i).column_letter].width = max(len(col)+2, 12)
+
+
+    try:
+        file_path = f"Data/OI_data/OI_Summary_{datetime.now().strftime('%Y%m%d_%H%M%S')}.xlsx"
+        wb.save(file_path)
+    except Exception as e:
+        print(f"Error saving Excel file: {e}")
+
+
+    return file_path
 
 
 def loop_question_between_times(start_time="00:00", end_time="23:00", interval=60):
@@ -435,15 +620,17 @@ def loop_question_between_times(start_time="00:00", end_time="23:00", interval=6
     r5 = create_stock_call_table(current_df, prev_df, current_date, prev_date)
     r6 = create_stock_put_table(current_df, prev_df, current_date, prev_date)
 
-    month_expry_day = get_expry_days(exchange='NSE', index='NIFTY', expiry_type='month')
-    week_expry_day = get_expry_days(exchange='NSE', index='NIFTY', expiry_type='week')
+    # month_expry_day = get_expry_days(exchange='NSE', index='NIFTY', expiry_type='month')
+    # week_expry_day = get_expry_days(exchange='NSE', index='NIFTY', expiry_type='week')
+
+    month_expry_day = week_expry_day = 'Tuesday'
     week_expry, month_expry = get_expiry_dates(weekly_day= week_expry_day, monthly_day=month_expry_day)
+
     OI_table = create_OI_table(curr_fo_bhav, [week_expry, month_expry], 'NIFTY')
     nifty_pcr = get_pcr(curr_fo_bhav, XpryDt = week_expry, index = 'NIFTY' )
 
 
     extra_table_data = create_html_for_exposure(index_long_exposure, stock_long_exposure)
-    # commentry = get_commentry(r1, index_long_exposure)
     commentry = get_commentry(r1, r2, r3, index_long_exposure, nifty_pcr, OI_table, week_expry, month_expry)
     html = create_html_table_with_predefined_html([{'heading': 'Index Futures', 'df': r1},
                                                 {'heading': 'Stock Futures', 'df': r4},
@@ -453,7 +640,6 @@ def loop_question_between_times(start_time="00:00", end_time="23:00", interval=6
                                                 {'heading': 'Stock Put Options', 'df': r6}], extra_table_data, commentry)
     
 
-
     try:
         save_html_as_png(html_string=html)
     except Exception as e:
@@ -461,8 +647,7 @@ def loop_question_between_times(start_time="00:00", end_time="23:00", interval=6
         pass
 
     send_email( 
-                recipient_emails=['shubh.goela@mnclgroup.com'],
-                bcc_emails=MAIL_RECIPIENTS_REPORT,
+                recipient_emails=MAIL_RECIPIENTS_REPORT,
                 subject='Participant Wise Derivatives FII-DII Data',
                 body=html,
                 html_body=html,
@@ -483,21 +668,31 @@ def loop_question_between_times(start_time="00:00", end_time="23:00", interval=6
 
     adjust_corp_actions(date=datetime.now())
 
-    month_expry_day = get_expry_days(exchange='NSE', index='stock_options', expiry_type='month')
-    week_expry_day = get_expry_days(exchange='NSE', index='stock_options', expiry_type='week')
-    week_expry, month_expry = get_expiry_dates(weekly_day= week_expry_day, monthly_day=month_expry_day)
+    try:
+        df = get_google_script_data(GOOGLE_SCRIPT_URL)
+        symbols = list(df['STOCK_NAME'])
+        html = create_stock_analysis_report(curr_bhav, curr_fo_bhav, month_expry, symbols)
+    except Exception as e:
+        print(f"Failed to generate stock analysis report: {e}")
+        html = '''<p style="color:red;">Failed to generate stock analysis report</p>'''
+        pass
+    
+    try:
+        summary_rows = create_complete_OI_data_from_bhavcopy(curr_bhav, curr_fo_bhav, month_expry)
+    except Exception as e:
+        print(e)
+        summary_rows = []
+        pass
 
-    url = "https://script.google.com/macros/s/AKfycbw1xGzZU3wBUIZgXRYbWQGtXWPtr85EhJous66iToxI3xsLG-3YtyEUYfWf6Qd1G9phSw/exec?endpoint=getData&key=goela1008&sheet=TICKER%20LIST"
-    df = get_google_script_data(url)
-    symbols = list(df['STOCK_NAME'])
-    html = create_stock_analysis_report(curr_bhav, curr_fo_bhav, month_expry, symbols)
+    file_path = create_and_archive_OI_excel_report(summary_rows)
 
     send_email( 
         recipient_emails=MAIL_RECIPIENTS_REPORT,
         subject='Stock Analysis Report',
         body=html,
-        html_body=html)
-    
+        html_body=html,
+        attachments=[file_path])
+
     return True
 
 

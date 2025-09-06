@@ -14,6 +14,7 @@ DB_NAME = os.getenv('DB_NAME')
 print(f"Connecting to MongoDB at {DB_URI} for database {DB_NAME}")
 client = MongoClient(DB_URI, tlsCAFile=certifi.where())
 
+
 db = client[DB_NAME]
 
 

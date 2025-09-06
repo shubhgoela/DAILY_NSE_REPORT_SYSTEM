@@ -39,7 +39,6 @@ from selenium.common.exceptions import TimeoutException, NoSuchElementException,
 
 from dotenv import find_dotenv, load_dotenv
 
-from utils import month_abbreviations, abbreviation_to_month
 from queries import get_holidays_for_year, get_exception_trading_dates_to_year
 from logging_config import setup_logging
 

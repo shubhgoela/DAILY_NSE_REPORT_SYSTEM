@@ -59,7 +59,20 @@ def df_to_styled_html(df: pd.DataFrame) -> str:
 
     return html
 
-
+def safe_percentage_change(numerator_series, denominator_series):
+    """
+    Calculate percentage change safely, avoiding division by zero.
+    Returns a NumPy array rounded to 2 decimals.
+    """
+    num = numerator_series.astype(float).to_numpy()
+    den = denominator_series.astype(float).to_numpy()
+    pct_change = np.divide(
+        num * 100,
+        den,
+        out=np.zeros_like(num, dtype=float),  # fill 0 where division is invalid
+        where=den != 0
+    )
+    return np.round(pct_change, 2)
 
 class FinancialDataAnalyzer:
     def __init__(self, fo_bhav_copy, symbol, month_expry, curr_close, prev_close):
@@ -84,7 +97,7 @@ class FinancialDataAnalyzer:
         self.oi_table = self.create_OI_table()
         self.curr_atm_oi = self.get_atm_and_oi_from_price(curr_close)
         self.prev_atm_oi = self.get_atm_and_oi_from_price(prev_close)
-        self.total_put_oi, self.total_call_oi, self.pcr, self.total_oi = self.get_pcr_and_total_oi()
+        self.total_put_oi, self.total_call_oi, self.pcr, self.total_oi, self.chng_in_oi, self.pct_chng_in_oi = self.get_pcr_and_total_oi()
 
         self.analysis_results = {}
     
@@ -240,14 +253,21 @@ class FinancialDataAnalyzer:
         total_row['XpryDt'] = 'Total'
 
         fo_bhav_copy_filtered = pd.concat([fo_bhav_copy_filtered, pd.DataFrame([total_row])], ignore_index=True)
-
-        # Calculate derived fields safely
-        fo_bhav_copy_filtered['prev_OpnIntrst'] = fo_bhav_copy_filtered['OpnIntrst'] - fo_bhav_copy_filtered['ChngInOpnIntrst']
-        fo_bhav_copy_filtered['pct_ChngInOpnIntrst'] = np.where(fo_bhav_copy_filtered['prev_OpnIntrst'] != 0,
-                                                              round((fo_bhav_copy_filtered['ChngInOpnIntrst'] / fo_bhav_copy_filtered['prev_OpnIntrst']) * 100, 2), 0)
-        fo_bhav_copy_filtered['pct_ChngInOptnPric'] = np.where(fo_bhav_copy_filtered['PrvsClsgPric'] != 0,
-                                                             round((fo_bhav_copy_filtered['SttlmPric'] - fo_bhav_copy_filtered['PrvsClsgPric']) / fo_bhav_copy_filtered['PrvsClsgPric'] * 100, 2), 0)
         
+        fo_bhav_copy_filtered['prev_OpnIntrst'] = (
+            fo_bhav_copy_filtered['OpnIntrst'].astype(float) - 
+            fo_bhav_copy_filtered['ChngInOpnIntrst'].astype(float)
+        )
+
+        fo_bhav_copy_filtered['pct_ChngInOpnIntrst'] = safe_percentage_change(
+            fo_bhav_copy_filtered['ChngInOpnIntrst'],
+            fo_bhav_copy_filtered['prev_OpnIntrst']
+        )
+        
+        fo_bhav_copy_filtered['pct_ChngInOptnPric'] = safe_percentage_change(
+            fo_bhav_copy_filtered['SttlmPric'] - fo_bhav_copy_filtered['PrvsClsgPric'],
+            fo_bhav_copy_filtered['PrvsClsgPric']
+        )
         fo_bhav_copy_filtered = fo_bhav_copy_filtered.fillna('')
         fo_bhav_copy_filtered.reset_index(drop=True, inplace=True)
 
@@ -276,10 +296,17 @@ class FinancialDataAnalyzer:
         put_oi = fo_data_filterd_pe['OpnIntrst'].sum()
         call_oi = fo_data_filterd_ce['OpnIntrst'].sum()
 
+        chng_put_oi = fo_data_filterd_pe['ChngInOpnIntrst'].sum()
+        chng_call_oi = fo_data_filterd_ce['ChngInOpnIntrst'].sum()
+        total_chng_oi = chng_put_oi + chng_call_oi
+
         pcr = round((put_oi/call_oi), 2) if call_oi != 0 else 0
         total_oi = put_oi + call_oi
-        
-        return put_oi, call_oi, pcr, total_oi
+        prev_oi = total_oi - total_chng_oi
+        chng_in_oi = total_chng_oi
+        pct_chng_in_oi = round((chng_in_oi / prev_oi) * 100, 2) if prev_oi != 0 else 0
+
+        return put_oi, call_oi, pcr, total_oi, chng_in_oi, pct_chng_in_oi
 
     def analyze_futures_market(self):
         """Analyze futures market data"""
